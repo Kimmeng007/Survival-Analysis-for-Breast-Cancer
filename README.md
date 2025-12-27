@@ -15,7 +15,7 @@ Breast cancer survival varies widely across patients depending on clinical and b
 
 ## Dataset
 
-- **Source:** METABRIC (Molecular Taxonomy of Breast Cancer International Consortium)
+- **Source:** METABRIC (Molecular Taxonomy of Breast Cancer International Consortium) https://www.cbioportal.org/study/clinicalData?id=brca_metabric
 - **Sample size:** ~2,500 breast cancer patients
 - **Data types:**
   - Clinical variables (age, tumor stage, surgery type, treatments, receptor status)

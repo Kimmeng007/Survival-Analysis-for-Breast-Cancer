@@ -1,18 +1,4 @@
----
-title: "Survival_Analysis_Breast_Cancer"
-author: "HONG Kimmeng"
-date: "`r Sys.Date()`"
-output: html_document
----
-
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-```
-
-# Survival Analysis for Breast Cancer
-
-## Libraries
-```{r}
+# Libraries
 library(readr)
 library(skimr)
 library(ggplot2)
@@ -32,18 +18,47 @@ library(mice)
 library(matrixStats)
 library(splines)
 library(glmnet)
-options(warn = -1)
-```
 
-## I. Load Dataset
-```{r}
+# I. Understanding the context of the problem and dataset
 df <- read_tsv("brca_metabric_clinical_data.tsv")
 head(df)
-```
+summary(df)
+skim(df)
+glimpse(df)
 
-## II. Exploratory data analysis
-### Graphical Summaries
-```{r}
+# II. Exploratory data analysis
+
+# 2.
+# Numerical summaries
+# Continuous variables
+df %>%
+  summarise(
+    n = n (),
+    mean_age = mean(`Age at Diagnosis`, na.rm = TRUE),
+    medidan_tumor_size = median(`Tumor Size`, na.rm = TRUE),
+    mean_overall_survival_months = mean(`Overall Survival (Months)`, na.rm = TRUE),
+    mean_rfs_months = mean(`Relapse Free Status (Months)`, na.rm = TRUE)
+  )
+
+df %>%
+  summarise(
+    `Number of patients` = n(),
+    `Mean age` = mean(`Age at Diagnosis`, na.rm = TRUE),
+    `Median tumor size` = median(`Tumor Size`, na.rm = TRUE),
+    `Mean overall survival (months)` = mean(`Overall Survival (Months)`, na.rm = TRUE),
+    `Mean relapse-free survival (months)` = mean(`Relapse Free Status (Months)`, na.rm = TRUE)
+  ) %>%
+  pivot_longer(
+    everything(),
+    names_to = "Variable",
+    values_to = "Value"
+  )
+
+# Frequency tables for categorical variables
+table(df$`ER Status`)
+table(df$`Tumor Stage`)
+
+# Graphical Summaries
 # Age Distribution
 ggplot(df, aes(x = `Age at Diagnosis`)) +
   geom_histogram(binwidth = 5, fill = "grey70", color = "black") +
@@ -93,11 +108,8 @@ ggplot(df_long, aes(x = Status)) +
     strip.text = element_text(face = "bold"),
     axis.title.y = element_text(face = "bold")
   )
-```
 
-### Explore dependence and correlations between variables
-
-```{r}
+# 3. Explore dependence and correlations between variables
 # Transform character variables to factor variables (categorical)
 exclude <- c("Study ID", "Patient ID", "Sample ID")
 
@@ -182,11 +194,9 @@ strong_corr <- data.frame(
 
 # remove duplicates (Var1-Var2 and Var2-Var1)
 strong_corr <- strong_corr[!duplicated(t(apply(strong_corr[,1:2], 1, sort))), ]
-```
 
-### Kaplan Meier Plot defined by the categorical variables.
 
-```{r}
+# 4. Graphically represent the survival functions in the subgroups defined by the categorical variables.
 # For Tumor Stage
 KM_fit_OS <- survfit(Surv(df$`Overall Survival (Months)`, df$`Overall Survival Status`) ~ df$`Tumor Stage`)
 autoplot(KM_fit_OS, ylab = "Overall Survival (%)", xlab = "Time (Months)")
@@ -221,11 +231,10 @@ for (var in cat_var){
 }
 
 test_results[order(test_results$OS_p_value), ]
-```
-## III. Statistical modelling and analysis
-### Handling missing values
 
-```{r}
+
+# III. Statistical modelling and analysis
+# Handling missing values
 # Remove rows of outcome variables that have missing values
 df_clean <- df[!is.na(df$`Overall Survival (Months)`) & !is.na(df$`Overall Survival Status`)
                   & !is.na(df$`Relapse Free Status (Months)`) & !is.na(df$`Relapse Free Status`), ]
@@ -271,10 +280,8 @@ if (length(cols_mice) > 0) {
 
 # Check final missing values
 colSums(is.na(df_clean))
-```
-### Train-test spit
 
-```{r}
+# 6. Train-test spit
 set.seed(44)
 train_index <- createDataPartition(df_clean$`Overall Survival Status`, p = 0.75, list = FALSE, times = 1)
 train_data <- df_clean[train_index, ]
@@ -283,22 +290,16 @@ test_data <- df_clean[-train_index, ]
 # Check percentage of censorship
 prop.table(table(train_data$`Overall Survival Status`))
 prop.table(table(test_data$`Overall Survival Status`))
-```
 
-### Linear Cox Model
-
-```{r}
+# 7.1 Linear Cox Model
 # Perform stepwise selection using AIC score for variable selection
 full_cox <- coxph(Surv(`Overall Survival (Months)`, `Overall Survival Status`) ~ . - `Patient ID` - `Sample ID`
                   - `Relapse Free Status (Months)` - `Relapse Free Status` - `Patient's Vital Status`, data = train_data, x = TRUE, y = TRUE)
 
-cox_linear <- suppressWarnings(stepAIC(full_cox, direction = 'both', trace = FALSE))
+cox_linear <- stepAIC(full_cox, direction = 'both')
 cox_linear
-```
 
-### Model Diagnostics
-
-```{r}
+# Model Diagnostic
 # Check for linearity with martingales residuals for continous variables
 conti_covariates <- c("Age at Diagnosis", "Tumor Size")
 res <- residuals(cox_linear, type = "martingale")
@@ -318,63 +319,33 @@ for (var in conti_covariates) {
 
 do.call(grid.arrange, c(plots, ncol = 1))
 
-# Check for time invariance via Schoenfeld residuals
-par(mfrow = c(4, 3), mar = c(3, 3, 2, 1))
-plot(cox.zph(cox_linear), col = "red")
-cox.zph(cox_linear)
-```
-
-### Non-linear cox model
-
-```{r}
+# 7.2. Non-linear cox model
 cox_nonlinear <- coxph(Surv(`Overall Survival (Months)`, `Overall Survival Status`) ~ ns(`Age at Diagnosis`, df = 3) + log(`Tumor Size`)
                        + `Lymph nodes examined positive` + `Nottingham prognostic index` + `Type of Breast Surgery`+ Chemotherapy
                        + `Pam50 + Claudin-low subtype` + `ER Status` + `HER2 Status` + `Inferred Menopausal State`
                        + `Radio Therapy` + `Tumor Stage`, data = train_data, x = TRUE, y = TRUE)
 
 cox_nonlinear
-```
 
-### Random Forest Model
+# Check for time invariance via Schoenfeld residuals
+# ggcoxzph(cox.zph(cox_nonlinear))
+# par(mfrow = c(4, 3), mar = c(6, 4, 2, 1))
+par(mfrow = c(4, 3), mar = c(3, 3, 2, 1))
+plot(cox.zph(cox_nonlinear), col = "red")
+cox.zph(cox_nonlinear)
 
-```{r}
-# Default
-rsf_default <- rfsrc(
-  Surv(`Overall Survival (Months)`, `Overall Survival Status`) ~ .,
-  data = train_data[, !names(train_data) %in% c("Patient ID", "Sample ID", "Relapse Free Status (Months)",
-                                                "Relapse Free Status", "Patient's Vital Status")],
-  ntree = 100
-)
-
-# Calibrated RSF
-rsf_calibrated <- rfsrc(
-  Surv(`Overall Survival (Months)`, `Overall Survival Status`) ~ .,
-  data = train_data[, !names(train_data) %in% c("Patient ID", "Sample ID", "Relapse Free Status (Months)",
-                                                "Relapse Free Status", "Patient's Vital Status")],
-  ntree = 100,
-  mtry = 7,
-  nodesize = 30,
-  nsplit = 20,
-  importance = "permute",
-)
-
-#vimp_result <- vimp(rsf_calibrated)
-#plot(vimp_result)
-```
-
-### Model Evaluation
-We used Brier Score for model evaluation.
-
-```{r}
+# 8.
+# Time points at which to evaluate the Brier score
 times <- seq(0, max(train_data$`Overall Survival (Months)`), by = 12)
 
+# Compute Brier score
 brier_res <- Score(
-  list("Linear Cox Model" = cox_linear, "Non-linear Cox Model" = cox_nonlinear,
-       "RSF Default" = rsf_default, "RSF Calibrated" = rsf_calibrated),
+  list("Linear Cox Model" = cox_linear, "Non Linear Cox Model" = cox_nonlinear),
   formula = Surv(`Overall Survival (Months)`, `Overall Survival Status`) ~ 1,
   data = test_data,
   times = times,
-  # metrics = "brier",
+  metrics = "brier",
+  cens.model = "km"
 )
 
 brier_df <- brier_res$Brier$score
@@ -394,12 +365,8 @@ ggplot(brier_df, aes(x = times, y = Brier, color = model)) +
   ) +
   theme_minimal() +
   theme(legend.title = element_blank())
-```
 
-### Survival Probability Estimation
-Estimate survival probability of new patients living more than 12 years, and compare with conditional survival probability knowing that the patients have already survived 5 years since diagnosis.
-
-```{r}
+# 9
 new_patients <- data.frame(
   # varied covariates
   `Age at Diagnosis` = c(40, 55, 70),
@@ -458,9 +425,192 @@ results_nonlinear <- data.frame(
   Conditional_Prob = c(cond_nonlinear)
 )
 print(results_nonlinear)
-```
+
+# 11. Random Forest Model
+# Default
+rsf_default <- rfsrc(
+  Surv(`Overall Survival (Months)`, `Overall Survival Status`) ~ .,
+  data = train_data[, !names(train_data) %in% c("Patient ID", "Sample ID", "Relapse Free Status (Months)",
+                                                "Relapse Free Status", "Patient's Vital Status")],
+  ntree = 200
+)
+
+print(rsf_default)
+
+# Calibrated RSF
+rsf_calibrated <- rfsrc(
+  Surv(`Overall Survival (Months)`, `Overall Survival Status`) ~ .,
+  data = train_data[, !names(train_data) %in% c("Patient ID", "Sample ID", "Relapse Free Status (Months)",
+                                                "Relapse Free Status", "Patient's Vital Status")],
+  ntree = 200,
+  mtry = 7,
+  nodesize = 30,
+  nsplit = 20,
+  importance = "permute",
+)
+
+print(rsf_calibrated)
+
+vimp_result <- vimp(rsf_calibrated)
+plot(vimp_result)
+
+times <- seq(0, max(train_data$`Overall Survival (Months)`), by = 12)
+
+brier_res <- Score(
+  list("Linear Cox Model" = cox_linear, "Non-linear Cox Model" = cox_nonlinear,
+       "RSF Default" = rsf_default, "RSF Calibrated" = rsf_calibrated),
+  formula = Surv(`Overall Survival (Months)`, `Overall Survival Status`) ~ 1,
+  data = test_data,
+  times = times,
+  # metrics = "brier",
+)
+
+brier_df <- brier_res$Brier$score
+
+total_time <- max(times)
+ibs_table <- brier_df %>%
+  group_by(model) %>%
+  summarise(IBS = trapz(times, Brier) / total_time)
+ibs_table
+
+ggplot(brier_df, aes(x = times, y = Brier, color = model)) +
+  geom_line(size = 1) +
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill = model), alpha = 0.2, color = NA) +
+  labs(
+    x = "Time",
+    y = "Brier Score"
+  ) +
+  theme_minimal() +
+  theme(legend.title = element_blank())
 
 
+# 13
+# We can use IBS (Integrated Brier Score) to compare models
+# Interpret variable importance in Random Forest model
+plot(vimp(rsf_calibrated))
+
+# 14.
+# Add geonomic data
+gene_df <- read.table("brca_metabric/data_mrna_illumina_microarray.txt", header = TRUE)
+gene_df <- gene_df[, !names(gene_df) %in% "Entrez_Gene_Id"]
+
+# Tranpose genomic data to have gene expression as columns
+gene_df_t <- as.data.frame(t(gene_df))
+
+# Remove HugoSymbol rows and change Patient ID structure to fit with clinical dataset
+colnames(gene_df_t) <- gene_df$Hugo_Symbol
+gene_df_t <- gene_df_t[-1, ]
+gene_df_t <- cbind(`Patient ID` = rownames(gene_df_t), gene_df_t)
+rownames(gene_df_t) <- NULL
+gene_df_t$`Patient ID` <- gsub("\\.", "-", gene_df_t$`Patient ID`)
+
+# Combine Clinical and Genomic Data
+merge_data <- merge(df_clean, gene_df_t, by = "Patient ID")
+
+# Remove Patient ID, Sample ID, and Patient's Vital Status columns
+merge_data <- merge_data[, -c(1, 2)]
+merge_data <- merge_data[, !names(merge_data) %in% "Patient's Vital Status"]
+
+#remove one row where survival month = 0 to avoid error
+merge_data <- merge_data[merge_data$`Overall Survival (Months)` != 0, ]
+
+# Remove 16 missing value rows
+merge_data <- na.omit(merge_data)
+
+# Convert Genomic data to numeric
+merge_data[32:ncol(merge_data)] <- lapply(merge_data[32:ncol(merge_data)], as.numeric)
+
+gene_cols <- names(merge_data[32:ncol(merge_data)])
+
+# create partition stratified on status
+train_idx_merge <- createDataPartition(merge_data$`Overall Survival Status`, p = 0.75, list = FALSE)
+train_merge <- merge_data[train_idx_merge , ]
+test_merge  <- merge_data[-train_idx_merge , ]
+
+# Check percentage of censorship
+prop.table(table(train_merge$`Overall Survival Status`))
+prop.table(table(test_merge$`Overall Survival Status`))
+
+top_n_genes <- 500
+
+# Extract gene matrices (patients x genes)
+expr_train <- as.matrix(train_merge[, gene_cols, drop = FALSE])
+expr_test  <- as.matrix(test_merge[,  gene_cols, drop = FALSE])
+
+# compute variance on training set
+gene_vars <- colVars(expr_train, na.rm = TRUE)
+top_genes <- names(sort(gene_vars, decreasing = TRUE))[1:top_n_genes]
+
+# Subset matrices to top genes
+expr_train_top <- expr_train[, top_genes, drop = FALSE]
+expr_test_top  <- expr_test[,  top_genes, drop = FALSE]
+
+# Standardize using training mean/sd (no imputation needed)
+train_mean <- colMeans(expr_train_top)
+train_sd   <- apply(expr_train_top, 2, sd)
+
+# avoid division by zero
+train_sd[train_sd == 0] <- 1
+
+scale_with_train <- function(mat, mean_vec, sd_vec) {
+  t( (t(mat) - mean_vec) / sd_vec )
+}
+
+hv_gene_train <- scale_with_train(expr_train_top, train_mean, train_sd)
+hv_gene_test  <- scale_with_train(expr_test_top,  train_mean, train_sd)
+
+# combine high variance genes with clinical data
+clinical_data_train <- train_merge[, -c(32:ncol(train_merge))]
+clinical_data_train <- clinical_data_train[, -c(22 ,23, 26, 27)]
+clinical_data_train <- model.matrix(~ . -1, data = clinical_data_train)
+
+clinical_data_test <- test_merge[, -c(32:ncol(test_merge))]
+clinical_data_test <- clinical_data_test[, -c(22 ,23, 26, 27)]
+clinical_data_test <- model.matrix(~ . -1, data = clinical_data_test)
+
+x_train <- as.matrix(cbind(clinical_data_train, hv_gene_train))
+x_test <- as.matrix(cbind(clinical_data_test , hv_gene_test))
+
+# Fit elastic-net Cox
+set.seed(123)
+y <- Surv(train_merge$`Overall Survival (Months)`, train_merge$`Overall Survival Status`)
+elastic_cox <- cv.glmnet(x_train, y, family = "cox", alpha = 0.5)
+
+plot(elastic_cox)
+
+# Predict risk score for test set
+risk_score <- predict(elastic_cox, newx = x_test, s = "lambda.min", type = "link")
+
+y_test <- Surv(test_merge$`Overall Survival (Months)`, test_merge$`Overall Survival Status`)
+
+# Compute concordance
+c_index_obj <- concordance(y_test ~ risk_score)
+c_index <- c_index_obj$concordance
+c_index
+
+
+# Compare concordance index with previous clinical data models
+risk_cox_linear <- predict(cox_linear, newdata = test_merge, type = "risk")
+risk_cox_nonlinear <- predict(cox_nonlinear, newdata = test_merge, type = "risk")
+risk_rsf_default <- predict(rsf_default, newdata = test_merge)$predicted
+risk_rsf_calibrated <- predict(rsf_calibrated, newdata = test_merge)$predicted
+
+y_test <- Surv(test_merge$`Overall Survival (Months)`, test_merge$`Overall Survival Status`)
+
+#  C-index for each
+c_cox_linear <- concordance(y_test ~ risk_cox_linear)$concordance
+c_cox_nonlinear <- concordance(y_test ~ risk_cox_nonlinear)$concordance
+c_rsf_default <- concordance(y_test ~ risk_rsf_default)$concordance
+c_rsf_calibrated <- concordance(y_test ~ risk_rsf_calibrated)$concordance
+c_elastic <- concordance(y_test ~ risk_score)$concordance
+
+# Combine into a table
+cindex_table <- data.frame(
+  Model = c("Cox Linear", "Cox Nonlinear", "RSF Default", "RSF Calibrated", "Elastic-net Cox"),
+  C_index = c(c_cox_linear, c_cox_nonlinear, c_rsf_default, c_rsf_calibrated, c_elastic)
+)
+
+print(cindex_table)
 
 
 

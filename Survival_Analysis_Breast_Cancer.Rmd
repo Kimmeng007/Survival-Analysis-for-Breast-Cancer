@@ -1,0 +1,466 @@
+---
+title: "Survival_Analysis_Breast_Cancer"
+author: "HONG Kimmeng"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Survival Analysis for Breast Cancer
+
+## Libraries
+```{r}
+library(readr)
+library(skimr)
+library(ggplot2)
+library(tidyverse)
+library(fastDummies)
+library(corrplot)
+library(survival)
+library(ggfortify)
+library(caret)
+library(MASS)
+library(riskRegression)
+library(survminer)
+library(gridExtra)
+library(randomForestSRC)
+library(pracma)
+library(mice)
+library(matrixStats)
+library(splines)
+library(glmnet)
+options(warn = -1)
+```
+
+## I. Load Dataset
+```{r}
+df <- read_tsv("brca_metabric_clinical_data.tsv")
+head(df)
+```
+
+## II. Exploratory data analysis
+### Graphical Summaries
+```{r}
+# Age Distribution
+ggplot(df, aes(x = `Age at Diagnosis`)) +
+  geom_histogram(binwidth = 5, fill = "grey70", color = "black") +
+  labs(x = "Age at Diagnosis (years)", y = "Count") +
+  theme_classic(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 15),
+    strip.text = element_text(face = "bold"),
+    axis.title.y = element_text(face = "bold")
+  )
+
+# Tumor Size Distribution
+ggplot(df, aes(x = `Tumor Size`)) +
+  geom_histogram(binwidth = 5, fill = "grey70", color = "black") +
+  labs(x = 'Tumor Size (mm)', y = "Count") +
+  theme_classic(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 15),
+    strip.text = element_text(face = "bold"),
+    axis.title.y = element_text(face = "bold")
+  )
+
+# Tumor Stage
+ggplot(df, aes(x = `Tumor Stage`, fill = factor(`Overall Survival Status`))) +
+  # geom_bar(fill = "darkorange") +
+  geom_bar() +
+  labs(x = "Stage", y = "Count")
+
+
+df_long <- df %>%
+  pivot_longer(
+    cols = c(13, 16, 28),
+    names_to = "Marker",
+    values_to = "Status"
+  )
+
+ggplot(df_long, aes(x = Status)) +
+  geom_bar(fill = "grey70", color = "black", na.rm = TRUE) +
+  facet_wrap(~ Marker, ncol = 3, scales = "free_x") +
+  labs(
+    x = NULL,
+    y = "Number of Patients"
+  ) +
+  theme_classic(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 15),
+    strip.text = element_text(face = "bold"),
+    axis.title.y = element_text(face = "bold")
+  )
+```
+
+### Explore dependence and correlations between variables
+
+```{r}
+# Transform character variables to factor variables (categorical)
+exclude <- c("Study ID", "Patient ID", "Sample ID")
+
+# Transform character variables to factor variables
+df[] <- lapply(names(df), function(col) {
+  if (is.character(df[[col]]) && !(col %in% exclude)) {
+    as.factor(df[[col]])
+  } else {
+    df[[col]]
+  }
+})
+
+# drop columns with only 1 factor level
+one_level_col <- names(df)[sapply(df, function(x) length(unique(na.omit(x))) == 1)]
+df <- df[, !(names(df) %in% one_level_col)]
+
+binary_var <- names(df)[sapply(df, function(x) length(unique(na.omit(x))) == 2)]
+binary_var <- setdiff(binary_var, c("Overall Survival Status", "Relapse Free Status"))
+ordinal_var <- c("Cellularity", "Neoplasm Histologic Grade", "HER2 status measured by SNP6", "Tumor Stage")
+
+# Preserving order for binary variables
+df$`Type of Breast Surgery` <- factor(df$`Type of Breast Surgery`, levels = c("BREAST CONSERVING", "MASTECTOMY"))
+df$Chemotherapy  <- factor(df$Chemotherapy , levels = c("NO", "YES"))
+df$`ER status measured by IHC` <- factor(df$`ER status measured by IHC`, levels = c("Negative", "Positve"))
+df$`ER Status` <- factor(df$`ER Status` , levels = c("Negative", "Positive"))
+df$`HER2 Status` <- factor(df$`HER2 Status` , levels = c("Negative", "Positive"))
+df$`Hormone Therapy` <- factor(df$`Hormone Therapy` , levels = c("NO", "YES"))
+df$`Inferred Menopausal State` <- factor(df$`Inferred Menopausal State` , levels = c("Pre", "Post"))
+df$`Primary Tumor Laterality` <- factor(df$`Primary Tumor Laterality` , levels = c("Left", "Right"))
+df$`PR Status` <- factor(df$`PR Status` , levels = c("Negative", "Positive"))
+df$`Radio Therapy` <- factor(df$`Radio Therapy` , levels = c("NO", "YES"))
+
+# Encode the event variables to 0/1
+df$`Overall Survival Status` <- as.numeric(factor(df$`Overall Survival Status`, levels = c("0:LIVING", "1:DECEASED"))) - 1
+df$`Relapse Free Status` <- as.numeric(factor(df$`Relapse Free Status` , levels = c("0:Not Recurred", "1:Recurred"))) - 1
+
+# Preserving order for ordinal variables
+df$Cellularity <- factor(df$Cellularity, levels = c("Low", "Moderate", "High"))
+df$`Neoplasm Histologic Grade` <- factor(df$`Neoplasm Histologic Grade`, levels = c(1, 2, 3))
+# For `HER2 status measured by SNP6` var, make UNDEFINED value to NA
+df$`HER2 status measured by SNP6` <- ifelse(df$`HER2 status measured by SNP6` == "UNDEF", NA, as.character(df$`HER2 status measured by SNP6`))
+df$`HER2 status measured by SNP6` <- factor(df$`HER2 status measured by SNP6`, levels = c("LOSS", "NEUTRAL", "GAIN"))
+df$`Tumor Stage` <- factor(df$`Tumor Stage`, levels = c(0, 1, 2, 3, 4))
+
+# Make a copy of datafram df
+df_corr <- df
+
+# Make binary and ordinal variables to numeric
+for (col in binary_var) {
+  df_corr[[col]] <- as.numeric(df_corr[[col]]) - 1
+}
+
+for (col in ordinal_var) {
+  df_corr[[col]] <- as.numeric(df_corr[[col]])
+}
+
+# Transform norminal variables to dummies variables
+col_to_exclude <- c("Patient ID", "Sample ID", "Relapse Free Status (Months)",
+                    "Overall Survival (Months)", "Overall Survival Status",
+                    "Relapse Free Status", "Patient's Vital Status", binary_var, ordinal_var)
+df_dummy_norminal <-  dummy_cols(df_corr[, !(names(df_corr) %in% col_to_exclude)],
+                remove_selected_columns = TRUE, ignore_na = TRUE)
+
+df_binary <- df_corr[, binary_var]
+df_ordinal <- df_corr[, ordinal_var]
+
+df_dummy <- cbind(df_binary, df_ordinal, df_dummy_norminal)
+
+# Correlation matrix using spearman method
+cor_mat <- cor(df_dummy, use = 'pairwise.complete.obs', method = 'spearman')
+corrplot(cor_mat, method = 'color', tl.cex = 0.38, tl.srt = 45)
+
+# Find strong correlations
+strong_corr_idx <- which(abs(cor_mat) > 0.6 & abs(cor_mat) < 0.99, arr.ind = TRUE)
+
+# Create a data frame with variable names and correlation values
+strong_corr <- data.frame(
+  Var1 = rownames(cor_mat)[strong_corr_idx[,1]],
+  Var2 = colnames(cor_mat)[strong_corr_idx[,2]],
+  Correlation = cor_mat[strong_corr_idx]
+)
+
+# remove duplicates (Var1-Var2 and Var2-Var1)
+strong_corr <- strong_corr[!duplicated(t(apply(strong_corr[,1:2], 1, sort))), ]
+```
+
+### Kaplan Meier Plot defined by the categorical variables.
+
+```{r}
+# For Tumor Stage
+KM_fit_OS <- survfit(Surv(df$`Overall Survival (Months)`, df$`Overall Survival Status`) ~ df$`Tumor Stage`)
+autoplot(KM_fit_OS, ylab = "Overall Survival (%)", xlab = "Time (Months)")
+
+# For Type of Breast Surgery
+KM_fit_OS <- survfit(Surv(df$`Overall Survival (Months)`, df$`Overall Survival Status`) ~ df$`Type of Breast Surgery`)
+autoplot(KM_fit_OS, ylab = "Overall Survival (%)", xlab = "Time (Months)")
+
+# For ER Status
+KM_fit_OS <- survfit(Surv(df$`Overall Survival (Months)`, df$`Overall Survival Status`) ~ df$`ER Status`)
+autoplot(KM_fit_OS, ylab = "Overall Survival (%)", xlab = "Time (Months)")
+
+# For HER2 Status
+KM_fit_OS <- survfit(Surv(df$`Overall Survival (Months)`, df$`Overall Survival Status`) ~ df$`HER2 Status`)
+autoplot(KM_fit_OS, ylab = "Overall Survival (%)", xlab = "Time (Months)")
+
+# 5. Log Rank test for each categorical variable
+cat_var <- names(df)[sapply(df, is.factor)]
+cat_var <- setdiff(cat_var, "Patient's Vital Status")
+test_results <- data.frame(variable = character(), OS_p_value = numeric())
+
+for (var in cat_var){
+  # OS test
+  os_test <- survdiff(Surv(df$`Overall Survival (Months)`, df$`Overall Survival Status`) ~ df[[var]])
+  os_p <- os_test$pval
+
+  test_results <- rbind(test_results, data.frame(
+    variable = var,
+    OS_p_value = os_p
+    # RFS_p_value = rfs_p
+  ))
+}
+
+test_results[order(test_results$OS_p_value), ]
+```
+## III. Statistical modelling and analysis
+### Handling missing values
+
+```{r}
+# Remove rows of outcome variables that have missing values
+df_clean <- df[!is.na(df$`Overall Survival (Months)`) & !is.na(df$`Overall Survival Status`)
+                  & !is.na(df$`Relapse Free Status (Months)`) & !is.na(df$`Relapse Free Status`), ]
+
+# Calculate missing percentage per column
+missing_pct <- colSums(is.na(df_clean)) / nrow(df_clean) * 100
+
+# Thresholds
+median_mode_thresh <- 5    # <5% missing
+mice_thresh <- 30          # 5–30% missing
+
+# Median/mode imputation for <5% missing
+for (col in names(df_clean)) {
+  pct <- missing_pct[col]
+
+  if (pct > 0 & pct <= median_mode_thresh) {
+    if (is.numeric(df_clean[[col]])) {
+      # Median for numeric
+      df_clean[[col]][is.na(df_clean[[col]])] <- median(df_clean[[col]], na.rm = TRUE)
+      cat(col, "numeric imputed (median)\n")
+    } else {
+      # Mode for categorical
+      mode_val <- names(sort(table(df_clean[[col]]), decreasing = TRUE))[1]
+      df_clean[[col]][is.na(df_clean[[col]])] <- mode_val
+      cat(col, "categorical imputed (mode)\n")
+    }
+  }
+}
+
+# MICE imputation for 5–30% missing
+cols_mice <- names(missing_pct[missing_pct > median_mode_thresh & missing_pct <= mice_thresh])
+if (length(cols_mice) > 0) {
+  # Subset for MICE
+  mice_data <- df_clean[, cols_mice]
+
+  # Run MICE
+  imputed <- mice(mice_data, m = 1, method = 'pmm', seed = 123)
+  df_clean[, cols_mice] <- complete(imputed, 1)
+
+  cat("MICE imputation done for columns:\n")
+  print(cols_mice)
+}
+
+# Check final missing values
+colSums(is.na(df_clean))
+```
+### Train-test spit
+
+```{r}
+set.seed(44)
+train_index <- createDataPartition(df_clean$`Overall Survival Status`, p = 0.75, list = FALSE, times = 1)
+train_data <- df_clean[train_index, ]
+test_data <- df_clean[-train_index, ]
+
+# Check percentage of censorship
+prop.table(table(train_data$`Overall Survival Status`))
+prop.table(table(test_data$`Overall Survival Status`))
+```
+
+### Linear Cox Model
+
+```{r}
+# Perform stepwise selection using AIC score for variable selection
+full_cox <- coxph(Surv(`Overall Survival (Months)`, `Overall Survival Status`) ~ . - `Patient ID` - `Sample ID`
+                  - `Relapse Free Status (Months)` - `Relapse Free Status` - `Patient's Vital Status`, data = train_data, x = TRUE, y = TRUE)
+
+cox_linear <- suppressWarnings(stepAIC(full_cox, direction = 'both', trace = FALSE))
+cox_linear
+```
+
+### Model Diagnostics
+
+```{r}
+# Check for linearity with martingales residuals for continous variables
+conti_covariates <- c("Age at Diagnosis", "Tumor Size")
+res <- residuals(cox_linear, type = "martingale")
+plots <- list()
+
+for (var in conti_covariates) {
+  col <- train_data[[var]]
+
+  p <- ggplot(data.frame(x = col, y = res), aes(x = x, y = y)) +
+    geom_point(alpha = 0.6) +
+    geom_smooth(method = "loess", se = FALSE, color = "red") +
+    labs(x = var, y = "Martingale Residuals") +
+    theme_minimal()
+
+  plots[[var]] <- p
+}
+
+do.call(grid.arrange, c(plots, ncol = 1))
+
+# Check for time invariance via Schoenfeld residuals
+par(mfrow = c(4, 3), mar = c(3, 3, 2, 1))
+plot(cox.zph(cox_linear), col = "red")
+cox.zph(cox_linear)
+```
+
+### Non-linear cox model
+
+```{r}
+cox_nonlinear <- coxph(Surv(`Overall Survival (Months)`, `Overall Survival Status`) ~ ns(`Age at Diagnosis`, df = 3) + log(`Tumor Size`)
+                       + `Lymph nodes examined positive` + `Nottingham prognostic index` + `Type of Breast Surgery`+ Chemotherapy
+                       + `Pam50 + Claudin-low subtype` + `ER Status` + `HER2 Status` + `Inferred Menopausal State`
+                       + `Radio Therapy` + `Tumor Stage`, data = train_data, x = TRUE, y = TRUE)
+
+cox_nonlinear
+```
+
+### Random Forest Model
+
+```{r}
+# Default
+rsf_default <- rfsrc(
+  Surv(`Overall Survival (Months)`, `Overall Survival Status`) ~ .,
+  data = train_data[, !names(train_data) %in% c("Patient ID", "Sample ID", "Relapse Free Status (Months)",
+                                                "Relapse Free Status", "Patient's Vital Status")],
+  ntree = 100
+)
+
+# Calibrated RSF
+rsf_calibrated <- rfsrc(
+  Surv(`Overall Survival (Months)`, `Overall Survival Status`) ~ .,
+  data = train_data[, !names(train_data) %in% c("Patient ID", "Sample ID", "Relapse Free Status (Months)",
+                                                "Relapse Free Status", "Patient's Vital Status")],
+  ntree = 100,
+  mtry = 7,
+  nodesize = 30,
+  nsplit = 20,
+  importance = "permute",
+)
+
+#vimp_result <- vimp(rsf_calibrated)
+#plot(vimp_result)
+```
+
+### Model Evaluation
+We used Brier Score for model evaluation.
+
+```{r}
+times <- seq(0, max(train_data$`Overall Survival (Months)`), by = 12)
+
+brier_res <- Score(
+  list("Linear Cox Model" = cox_linear, "Non-linear Cox Model" = cox_nonlinear,
+       "RSF Default" = rsf_default, "RSF Calibrated" = rsf_calibrated),
+  formula = Surv(`Overall Survival (Months)`, `Overall Survival Status`) ~ 1,
+  data = test_data,
+  times = times,
+  # metrics = "brier",
+)
+
+brier_df <- brier_res$Brier$score
+
+total_time <- max(times)
+ibs_table <- brier_df %>%
+  group_by(model) %>%
+  summarise(IBS = trapz(times, Brier) / total_time)
+ibs_table
+
+ggplot(brier_df, aes(x = times, y = Brier, color = model)) +
+  geom_line(size = 1) +
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill = model), alpha = 0.2, color = NA) +
+  labs(
+    x = "Time",
+    y = "Brier Score"
+  ) +
+  theme_minimal() +
+  theme(legend.title = element_blank())
+```
+
+### Survival Probability Estimation
+Estimate survival probability of new patients living more than 12 years, and compare with conditional survival probability knowing that the patients have already survived 5 years since diagnosis.
+
+```{r}
+new_patients <- data.frame(
+  # varied covariates
+  `Age at Diagnosis` = c(40, 55, 70),
+  `Pam50 + Claudin-low subtype` = factor(c("LumA", "LumB", "Basal"), levels = levels(train_data$`Pam50 + Claudin-low subtype`)),
+  Chemotherapy = factor(c("NO", "YES", "YES"), levels = levels(train_data$Chemotherapy)),
+  `Tumor Stage` = factor(c(1, 3, 2), levels = levels(train_data$`Tumor Stage`)),
+
+  # fix covariates
+  `ER Status` = factor(c("Positive", "Positive", "Positive"), levels = levels(train_data$`ER Status`)),
+  `HER2 Status` = factor(c("Negative", "Negative", "Negative"), levels = levels(train_data$`HER2 Status`)),
+  `Inferred Menopausal State` = factor(c("Pre", "Pre", "Pre"), levels = levels(train_data$`Inferred Menopausal State`)),
+  `Lymph nodes examined positive` = c(2, 2, 2),
+  `Nottingham prognostic index` = c(2, 2, 2),
+  `Radio Therapy` = factor(c("NO", "NO", "NO"), levels = levels(train_data$`Radio Therapy`)),
+  `Tumor Size` = c(25, 25, 25),
+  `Type of Breast Surgery` = factor(c("BREAST CONSERVING", "BREAST CONSERVING", "BREAST CONSERVING"), levels = levels(train_data$`Type of Breast Surgery`)),
+   check.names = FALSE
+)
+
+# Compute survival curves for these patients using non-linear cox models
+surv_nonlinear <- survfit(cox_nonlinear, newdata = new_patients)
+
+ggsurvplot(
+  surv_nonlinear,
+  data = new_patients,
+  legend.labs = c("Patient 1", "Patient 2", "Patient 3"),
+  legend.title = "",
+  palette = c("darkgreen", "orange", "red"),
+  xlab = "Months",
+  ylab = "Survival Probability",
+  size = 0.9,      # line thickness
+  conf.int = TRUE,
+  ggtheme = theme_bw(base_size = 16)
+)
+
+
+# Survival probability at 12 years using non linear cox model
+summary(surv_nonlinear, times = 144)$surv
+
+# 10
+# times in months
+t0_months <- 7 * 12    # 84
+t1_months <- 12 * 12   # 144
+
+# estimate probabilities at times t0 and t1 for each new patient
+S_t0_nonlinear <- summary(surv_nonlinear, times = t0_months)$surv
+S_t1_nonlinear <- summary(surv_nonlinear, times = t1_months)$surv
+
+# conditional survival P(T > t1 | T > t0) = S(t1)/S(t0)
+cond_nonlinear <- S_t1_nonlinear / S_t0_nonlinear
+
+results_nonlinear <- data.frame(
+  Patients = paste0("Patient", 1:nrow(new_patients)),
+  S_t0_months = c(S_t0_nonlinear),
+  S_t1_months = c(S_t1_nonlinear),
+  Conditional_Prob = c(cond_nonlinear)
+)
+print(results_nonlinear)
+```
+
+
+
+
+
